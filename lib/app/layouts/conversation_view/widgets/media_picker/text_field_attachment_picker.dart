@@ -45,6 +45,7 @@ class AttachmentPicker extends StatefulWidget {
 
 class AttachmentPickerState extends OptimizedState<AttachmentPicker> {
   static const int _assetPageSize = 48;
+  // Match the familiar Standard/HD resolution tiers used by messaging apps.
   static const int _standardImageMaxEdge = 1600;
   static const int _standardImageQuality = 80;
   static const int _hdImageMaxEdge = 4096;
