@@ -22,11 +22,6 @@ class MessageUpdateHandler: MethodCallHandlerImpl() {
     ) {
         val message = MadridMessageUtil.fromCall(call)
 
-        if (!MessageViewRegistry.registered.contains(message.session)) {
-            result.success(null)
-            return
-        }
-
         MadridExtensionConnection.bind(call.argument("appId")!!, context) {
             it.extension?.messageUpdated(message)
             it.unbind(context)
