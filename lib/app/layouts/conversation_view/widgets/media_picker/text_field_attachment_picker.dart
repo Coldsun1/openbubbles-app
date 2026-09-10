@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math';
 
 import 'package:bluebubbles/app/layouts/conversation_details/dialogs/timeframe_picker.dart';
 import 'package:bluebubbles/app/layouts/conversation_view/widgets/message/interactive/polls.dart';
@@ -18,6 +19,7 @@ import 'package:file_picker/file_picker.dart' as pf;
 import 'package:flex_color_picker/flex_color_picker.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter_image_compress/flutter_image_compress.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:get/get.dart';
@@ -25,6 +27,8 @@ import 'package:hand_signature/signature.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:photo_manager/photo_manager.dart';
+import 'package:path/path.dart' as p;
+import 'package:path_provider/path_provider.dart';
 import 'package:collection/collection.dart';
 import 'package:bluebubbles/helpers/types/constants.dart' as constants;
 
@@ -40,7 +44,21 @@ class AttachmentPicker extends StatefulWidget {
 }
 
 class AttachmentPickerState extends OptimizedState<AttachmentPicker> {
+  static const int _assetPageSize = 48;
+  static const int _standardImageMaxEdge = 1600;
+  static const int _standardImageQuality = 80;
+  static const int _hdImageMaxEdge = 4096;
+  static const int _hdImageQuality = 90;
+
   List<AssetEntity> _images = <AssetEntity>[];
+  final ScrollController _mediaScrollController = ScrollController();
+  final Map<String, PlatformFile> _selectedGalleryFiles = {};
+  AssetPathEntity? _recentAssets;
+  bool _sendHd = false;
+  bool _limitedPhotoAccess = false;
+  bool _isLoadingMore = false;
+  bool _hasMoreAssets = true;
+  bool _isChangingQuality = false;
 
   ConversationViewController get controller => widget.controller;
 
@@ -297,8 +315,21 @@ class AttachmentPickerState extends OptimizedState<AttachmentPicker> {
   @override
   void initState() {
     super.initState();
+    _mediaScrollController.addListener(_onMediaScroll);
     getAttachments();
     generateIcons();
+  }
+
+  @override
+  void dispose() {
+    _mediaScrollController.dispose();
+    super.dispose();
+  }
+
+  void _onMediaScroll() {
+    if (_mediaScrollController.hasClients && _mediaScrollController.position.extentAfter < 600) {
+      _loadMoreAttachments();
+    }
   }
 
   Future<void> getAttachments() async {
@@ -310,11 +341,15 @@ class AttachmentPickerState extends OptimizedState<AttachmentPicker> {
       showSnackbar("Error", "Storage permission not granted!");
       return;
     }
-    List<AssetPathEntity> list = await PhotoManager.getAssetPathList(onlyAll: true);
+    _limitedPhotoAccess = ps == PermissionState.limited;
+    final List<AssetPathEntity> list = await PhotoManager.getAssetPathList(onlyAll: true);
     if (list.isNotEmpty) {
-      _images = await list.first.getAssetListRange(start: 0, end: 24);
+      _recentAssets = list.first;
+      final count = await _recentAssets!.assetCountAsync;
+      _images = await _recentAssets!.getAssetListRange(start: 0, end: min(_assetPageSize, count));
+      _hasMoreAssets = _images.length < count;
       // see if there is a recent attachment
-      if (DateTime.now().toLocal().isWithin(_images.first.modifiedDateTime, minutes: 2)) {
+      if (_images.isNotEmpty && DateTime.now().toLocal().isWithin(_images.first.modifiedDateTime, minutes: 2)) {
         final file = await _images.first.file;
         if (file != null) {
           eventDispatcher.emit('add-custom-smartreply', PlatformFile(
@@ -327,6 +362,131 @@ class AttachmentPickerState extends OptimizedState<AttachmentPicker> {
       }
     }
     setState(() {});
+  }
+
+  Future<void> _loadMoreAttachments() async {
+    if (_isLoadingMore || !_hasMoreAssets || _recentAssets == null) return;
+    _isLoadingMore = true;
+    try {
+      final count = await _recentAssets!.assetCountAsync;
+      final start = _images.length;
+      if (start >= count) {
+        _hasMoreAssets = false;
+        return;
+      }
+      final next = await _recentAssets!.getAssetListRange(
+        start: start,
+        end: min(start + _assetPageSize, count),
+      );
+      if (!mounted) return;
+      setState(() {
+        _images.addAll(next);
+        _hasMoreAssets = _images.length < count;
+      });
+    } finally {
+      _isLoadingMore = false;
+    }
+  }
+
+  Future<void> _manageLimitedPhotoAccess() async {
+    await PhotoManager.presentLimited(type: RequestType.common);
+    await getAttachments();
+  }
+
+  Future<PlatformFile?> _prepareGalleryAsset(AssetEntity asset) async {
+    final file = await asset.file;
+    if (file == null) return null;
+
+    final fileSize = await file.length();
+    if (fileSize / 1024000 > 1000) {
+      showSnackbar("Error", "This file is over 1 GB! Please compress it before sending.");
+      return null;
+    }
+
+    final mimeType = asset.mimeType?.toLowerCase();
+    final canOptimize = asset.type == AssetType.image
+        && mimeType != "image/gif"
+        && (mimeType == "image/jpeg"
+            || mimeType == "image/jpg"
+            || mimeType == "image/png"
+            || mimeType == "image/heic"
+            || mimeType == "image/heif");
+    final longestEdge = max(asset.width, asset.height);
+    final maxEdge = _sendHd ? _hdImageMaxEdge : _standardImageMaxEdge;
+    final quality = _sendHd ? _hdImageQuality : _standardImageQuality;
+
+    if (!canOptimize || longestEdge <= maxEdge) {
+      return PlatformFile(
+        path: file.path,
+        name: p.basename(file.path),
+        size: fileSize,
+      );
+    }
+
+    final scale = maxEdge / longestEdge;
+    final targetWidth = (asset.width * scale).round();
+    final targetHeight = (asset.height * scale).round();
+    final preservePng = mimeType == "image/png";
+    final outputExtension = preservePng ? ".png" : ".jpg";
+    final outputFormat = preservePng ? CompressFormat.png : CompressFormat.jpeg;
+    final cacheDirectory = await getTemporaryDirectory();
+    final outputPath = p.join(
+      cacheDirectory.path,
+      "openbubbles-${asset.id.hashCode}-${DateTime.now().microsecondsSinceEpoch}$outputExtension",
+    );
+
+    final optimized = await FlutterImageCompress.compressAndGetFile(
+      file.path,
+      outputPath,
+      minWidth: targetWidth,
+      minHeight: targetHeight,
+      quality: quality,
+      format: outputFormat,
+      keepExif: true,
+    );
+
+    if (optimized == null) {
+      showSnackbar("Warning", "This photo could not be optimized, so the full-size version was selected.");
+      return PlatformFile(
+        path: file.path,
+        name: p.basename(file.path),
+        size: fileSize,
+      );
+    }
+
+    return PlatformFile(
+      path: optimized.path,
+      name: "${p.basenameWithoutExtension(file.path)}$outputExtension",
+      size: await optimized.length(),
+    );
+  }
+
+  Future<void> _toggleHd() async {
+    if (_isChangingQuality) return;
+    setState(() => _sendHd = !_sendHd);
+    showSnackbar(
+      _sendHd ? "HD photos" : "Standard quality",
+      _sendHd ? "Photos are sent at up to 4096 px." : "Photos are sent at up to 1600 px to save data.",
+    );
+    if (_selectedGalleryFiles.isEmpty) return;
+
+    setState(() => _isChangingQuality = true);
+    final selectedIds = _selectedGalleryFiles.keys.toList();
+    try {
+      for (final id in selectedIds) {
+        final asset = _images.firstWhereOrNull((element) => element.id == id);
+        final oldFile = _selectedGalleryFiles[id];
+        if (asset == null || oldFile == null) continue;
+        final replacement = await _prepareGalleryAsset(asset);
+        if (replacement == null) continue;
+        final index = controller.pickedAttachments.indexOf(oldFile);
+        if (index >= 0) controller.pickedAttachments[index] = replacement;
+        _selectedGalleryFiles[id] = replacement;
+      }
+    } finally {
+      _isChangingQuality = false;
+    }
+    if (mounted) setState(() {});
   }
 
   Future<void> openFullCamera({String type = 'camera'}) async {
@@ -419,6 +579,7 @@ class AttachmentPickerState extends OptimizedState<AttachmentPicker> {
               child: Padding(
                 padding: const EdgeInsets.all(10.0),
                 child: CustomScrollView(
+                  controller: _mediaScrollController,
                   physics: ThemeSwitcher.getScrollPhysics(),
                   scrollDirection: Axis.horizontal,
                   slivers: <Widget>[
@@ -529,6 +690,79 @@ class AttachmentPickerState extends OptimizedState<AttachmentPicker> {
                       )
                     ),
                     const SliverPadding(padding: EdgeInsets.only(left: 5, right: 5)),
+                    SliverToBoxAdapter(
+                      child: SizedBox(
+                        width: 100,
+                        child: Column(
+                          children: [
+                            SizedBox(
+                              height: 135,
+                              child: ElevatedButton(
+                                style: ElevatedButton.styleFrom(
+                                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                                  backgroundColor: _sendHd
+                                      ? context.theme.colorScheme.primaryContainer
+                                      : context.theme.colorScheme.properSurface,
+                                ),
+                                onPressed: _isChangingQuality ? null : _toggleHd,
+                                child: Column(
+                                  mainAxisAlignment: MainAxisAlignment.center,
+                                  children: [
+                                    if (_isChangingQuality)
+                                      const SizedBox.square(
+                                        dimension: 24,
+                                        child: CircularProgressIndicator(strokeWidth: 2),
+                                      )
+                                    else
+                                      Icon(
+                                        _sendHd ? Icons.hd : Icons.hd_outlined,
+                                        color: context.theme.colorScheme.properOnSurface,
+                                      ),
+                                    const SizedBox(height: 8),
+                                    Text(
+                                      "HD",
+                                      textAlign: TextAlign.center,
+                                      style: context.theme.textTheme.labelLarge!.copyWith(
+                                        color: context.theme.colorScheme.properOnSurface,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                            if (_limitedPhotoAccess) ...[
+                              const SizedBox(height: 10),
+                              SizedBox(
+                                height: 135,
+                                child: ElevatedButton(
+                                  style: ElevatedButton.styleFrom(
+                                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                                    backgroundColor: context.theme.colorScheme.properSurface,
+                                  ),
+                                  onPressed: _manageLimitedPhotoAccess,
+                                  child: Column(
+                                    mainAxisAlignment: MainAxisAlignment.center,
+                                    children: [
+                                      Icon(Icons.add_photo_alternate_outlined,
+                                          color: context.theme.colorScheme.properOnSurface),
+                                      const SizedBox(height: 8),
+                                      Text(
+                                        "More Photos",
+                                        textAlign: TextAlign.center,
+                                        style: context.theme.textTheme.labelLarge!.copyWith(
+                                          color: context.theme.colorScheme.properOnSurface,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ],
+                        ),
+                      ),
+                    ),
+                    const SliverPadding(padding: EdgeInsets.only(left: 5, right: 5)),
                     SliverGrid(
                       gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
                         crossAxisCount: 2,
@@ -541,22 +775,20 @@ class AttachmentPickerState extends OptimizedState<AttachmentPicker> {
                             key: Key("AttachmentPickerFile-${element.id}"),
                             data: element,
                             controller: controller,
+                            selectedPath: _selectedGalleryFiles[element.id]?.path,
                             onTap: () async {
-                              final file = await element.file;
-                              if (file == null) return;
-                              if ((await file.length()) / 1024000 > 1000) {
-                                showSnackbar("Error", "This file is over 1 GB! Please compress it before sending.");
-                                return;
-                              }
-                              if (controller.pickedAttachments.firstWhereOrNull((e) => e.path == file.path) != null) {
-                                controller.pickedAttachments.removeWhere((e) => e.path == file.path);
+                              final existing = _selectedGalleryFiles[element.id];
+                              if (existing != null) {
+                                controller.pickedAttachments.remove(existing);
+                                _selectedGalleryFiles.remove(element.id);
                               } else {
-                                controller.pickedAttachments.add(PlatformFile(
-                                  path: file.path,
-                                  name: file.path.split('/').last,
-                                  size: await file.length(),
-                                ));
+                                final prepared = await _prepareGalleryAsset(element);
+                                if (prepared != null) {
+                                  controller.pickedAttachments.add(prepared);
+                                  _selectedGalleryFiles[element.id] = prepared;
+                                }
                               }
+                              if (mounted) setState(() {});
                             },
                           );
                         },
