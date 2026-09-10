@@ -2,7 +2,6 @@ import 'dart:typed_data';
 
 import 'package:bluebubbles/app/wrappers/stateful_boilerplate.dart';
 import 'package:bluebubbles/helpers/ui/theme_helpers.dart';
-import 'package:bluebubbles/database/models.dart';
 import 'package:bluebubbles/services/services.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
@@ -16,16 +15,20 @@ class AttachmentPickerFile extends StatefulWidget {
     required this.onTap,
     required this.data,
     required this.controller,
+    this.selectedPath,
+    this.isPending = false,
   });
   final AssetEntity data;
-  final Function() onTap;
+  final Future<void> Function() onTap;
   final ConversationViewController controller;
+  final String? selectedPath;
+  final bool isPending;
 
   @override
   State<AttachmentPickerFile> createState() => _AttachmentPickerFileState();
 }
 
-class _AttachmentPickerFileState extends OptimizedState<AttachmentPickerFile> with AutomaticKeepAliveClientMixin {
+class _AttachmentPickerFileState extends OptimizedState<AttachmentPickerFile> {
   Uint8List? image;
   String? path;
 
@@ -36,41 +39,30 @@ class _AttachmentPickerFileState extends OptimizedState<AttachmentPickerFile> wi
   }
 
   Future<void> load() async {
-    final file = (await widget.data.file)!;
+    final file = await widget.data.file;
+    if (file == null) return;
     path = file.path;
-    if (widget.data.mimeType?.startsWith("video/") ?? false) {
-      try {
-        image = await as.getVideoThumbnail(file.path, useCachedFile: false);
-      } catch (ex) {
-        image = fs.noVideoPreviewIcon;
-      }
-      setState(() {});
-    } else if (widget.data.mimeType == "image/heic"
-        || widget.data.mimeType == "image/heif"
-        || widget.data.mimeType == "image/tif"
-        || widget.data.mimeType == "image/tiff") {
-      final fakeAttachment = Attachment(
-        transferName: file.path,
-        mimeType: widget.data.mimeType!,
+    try {
+      image = await widget.data.thumbnailDataWithSize(
+        const ThumbnailSize.square(300),
+        quality: 85,
       );
-      image = await as.loadAndGetProperties(fakeAttachment, actualPath: file.path, onlyFetchData: true, isPreview: true);
-      setState(() {});
-    } else {
-      image = await file.readAsBytes();
-      setState(() {});
+    } catch (_) {
+      if (widget.data.type == AssetType.video) image = fs.noVideoPreviewIcon;
     }
+    if (mounted) setState(() {});
   }
 
   @override
   Widget build(BuildContext context) {
     final hideAttachments = ss.settings.redactedMode.value && ss.settings.hideAttachments.value;
 
-    super.build(context);
     return Obx(() {
-      bool containsThis = widget.controller.pickedAttachments.firstWhereOrNull((e) => e.path == path) != null;
-      return AnimatedContainer(
-        duration: const Duration(milliseconds: 250),
-        margin: EdgeInsets.all(containsThis ? 10 : 0),
+      bool containsThis = widget.controller.pickedAttachments.firstWhereOrNull(
+        (e) => (path != null && e.path == path)
+            || (widget.selectedPath != null && e.path == widget.selectedPath),
+      ) != null;
+      return Container(
         decoration: BoxDecoration(
           borderRadius: BorderRadius.circular(10),
         ),
@@ -111,22 +103,53 @@ class _AttachmentPickerFileState extends OptimizedState<AttachmentPickerFile> wi
                     ),
                   ),
                 ),
-              if (containsThis || widget.data.type == AssetType.video)
-                Container(
-                  decoration: containsThis ? BoxDecoration(
-                    shape: BoxShape.circle,
-                    color: context.theme.colorScheme.primary
-                  ) : null,
-                  child: Padding(
-                    padding: const EdgeInsets.all(5.0),
-                    child: Icon(
-                      containsThis
-                          ? (iOS ? CupertinoIcons.check_mark : Icons.check)
-                          : (iOS ? CupertinoIcons.play_circle_fill : Icons.play_circle_filled),
-                      color: context.theme.colorScheme.onPrimary,
-                      size: containsThis ? 18 : 50,
+              if (containsThis)
+                Positioned.fill(
+                  child: IgnorePointer(
+                    child: Container(
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(10),
+                        border: Border.all(color: context.theme.colorScheme.primary, width: 3),
+                      ),
                     ),
                   ),
+                ),
+              if (widget.isPending)
+                Container(
+                  width: 34,
+                  height: 34,
+                  padding: const EdgeInsets.all(7),
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: context.theme.colorScheme.properSurface.withOpacity(0.9),
+                  ),
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2,
+                    color: context.theme.colorScheme.primary,
+                  ),
+                )
+              else if (containsThis)
+                Positioned(
+                  top: 6,
+                  right: 6,
+                  child: Container(
+                    padding: const EdgeInsets.all(5),
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: context.theme.colorScheme.primary,
+                    ),
+                    child: Icon(
+                      iOS ? CupertinoIcons.check_mark : Icons.check,
+                      color: context.theme.colorScheme.onPrimary,
+                      size: 18,
+                    ),
+                  ),
+                )
+              else if (widget.data.type == AssetType.video)
+                Icon(
+                  iOS ? CupertinoIcons.play_circle_fill : Icons.play_circle_filled,
+                  color: context.theme.colorScheme.onPrimary,
+                  size: 50,
                 ),
             ],
           ),
@@ -134,7 +157,4 @@ class _AttachmentPickerFileState extends OptimizedState<AttachmentPickerFile> wi
       );
     });
   }
-
-  @override
-  bool get wantKeepAlive => true;
 }
