@@ -54,6 +54,7 @@ class AttachmentPickerState extends OptimizedState<AttachmentPicker> {
   List<AssetEntity> _images = <AssetEntity>[];
   final ScrollController _mediaScrollController = ScrollController();
   final Map<String, PlatformFile> _selectedGalleryFiles = {};
+  final Set<String> _pendingGalleryAssets = {};
   AssetPathEntity? _recentAssets;
   bool _sendHd = false;
   bool _limitedPhotoAccess = false;
@@ -349,6 +350,9 @@ class AttachmentPickerState extends OptimizedState<AttachmentPicker> {
       final count = await _recentAssets!.assetCountAsync;
       _images = await _recentAssets!.getAssetListRange(start: 0, end: min(_assetPageSize, count));
       _hasMoreAssets = _images.length < count;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (_mediaScrollController.hasClients) _mediaScrollController.jumpTo(0);
+      });
       // see if there is a recent attachment
       if (_images.isNotEmpty && DateTime.now().toLocal().isWithin(_images.first.modifiedDateTime, minutes: 2)) {
         final file = await _images.first.file;
@@ -368,6 +372,7 @@ class AttachmentPickerState extends OptimizedState<AttachmentPicker> {
   Future<void> _loadMoreAttachments() async {
     if (_isLoadingMore || !_hasMoreAssets || _recentAssets == null) return;
     _isLoadingMore = true;
+    if (mounted) setState(() {});
     try {
       final count = await _recentAssets!.assetCountAsync;
       final start = _images.length;
@@ -386,6 +391,7 @@ class AttachmentPickerState extends OptimizedState<AttachmentPicker> {
       });
     } finally {
       _isLoadingMore = false;
+      if (mounted) setState(() {});
     }
   }
 
@@ -436,15 +442,18 @@ class AttachmentPickerState extends OptimizedState<AttachmentPicker> {
       "openbubbles-${asset.id.hashCode}-${DateTime.now().microsecondsSinceEpoch}$outputExtension",
     );
 
-    final optimized = await FlutterImageCompress.compressAndGetFile(
-      file.path,
-      outputPath,
-      minWidth: targetWidth,
-      minHeight: targetHeight,
-      quality: quality,
-      format: outputFormat,
-      keepExif: true,
-    );
+    XFile? optimized;
+    try {
+      optimized = await FlutterImageCompress.compressAndGetFile(
+        file.path,
+        outputPath,
+        minWidth: targetWidth,
+        minHeight: targetHeight,
+        quality: quality,
+        format: outputFormat,
+        keepExif: true,
+      );
+    } catch (_) {}
 
     if (optimized == null) {
       showSnackbar("Warning", "This photo could not be optimized, so the full-size version was selected.");
@@ -467,7 +476,9 @@ class AttachmentPickerState extends OptimizedState<AttachmentPicker> {
     setState(() => _sendHd = !_sendHd);
     showSnackbar(
       _sendHd ? "HD photos" : "Standard quality",
-      _sendHd ? "Photos are sent at up to 4096 px." : "Photos are sent at up to 1600 px to save data.",
+      _sendHd
+          ? "Photos are sent at up to 4096 px. Use Files to send an untouched original."
+          : "Photos are sent at up to 1600 px to save data. Use Files to send an untouched original.",
     );
     if (_selectedGalleryFiles.isEmpty) return;
 
@@ -502,7 +513,12 @@ class AttachmentPickerState extends OptimizedState<AttachmentPicker> {
 
     late final XFile? file;
     if (type == 'camera') {
-      file = await ImagePicker().pickImage(source: ImageSource.camera);
+      file = await ImagePicker().pickImage(
+        source: ImageSource.camera,
+        maxWidth: (_sendHd ? _hdImageMaxEdge : _standardImageMaxEdge).toDouble(),
+        maxHeight: (_sendHd ? _hdImageMaxEdge : _standardImageMaxEdge).toDouble(),
+        imageQuality: _sendHd ? _hdImageQuality : _standardImageQuality,
+      );
     } else {
       file = await ImagePicker().pickVideo(source: ImageSource.camera);
     }
@@ -721,7 +737,7 @@ class AttachmentPickerState extends OptimizedState<AttachmentPicker> {
                                       ),
                                     const SizedBox(height: 8),
                                     Text(
-                                      "HD",
+                                      _sendHd ? "HD" : "Standard",
                                       textAlign: TextAlign.center,
                                       style: context.theme.textTheme.labelLarge!.copyWith(
                                         color: context.theme.colorScheme.properOnSurface,
@@ -777,25 +793,47 @@ class AttachmentPickerState extends OptimizedState<AttachmentPicker> {
                             data: element,
                             controller: controller,
                             selectedPath: _selectedGalleryFiles[element.id]?.path,
+                            isPending: _pendingGalleryAssets.contains(element.id),
                             onTap: () async {
+                              if (_pendingGalleryAssets.contains(element.id)) return;
                               final existing = _selectedGalleryFiles[element.id];
                               if (existing != null) {
                                 controller.pickedAttachments.remove(existing);
                                 _selectedGalleryFiles.remove(element.id);
+                                if (mounted) setState(() {});
                               } else {
-                                final prepared = await _prepareGalleryAsset(element);
-                                if (prepared != null) {
-                                  controller.pickedAttachments.add(prepared);
-                                  _selectedGalleryFiles[element.id] = prepared;
+                                setState(() => _pendingGalleryAssets.add(element.id));
+                                try {
+                                  final prepared = await _prepareGalleryAsset(element);
+                                  if (prepared != null) {
+                                    controller.pickedAttachments.add(prepared);
+                                    _selectedGalleryFiles[element.id] = prepared;
+                                  }
+                                } catch (_) {
+                                  showSnackbar("Error", "This photo could not be selected.");
+                                } finally {
+                                  _pendingGalleryAssets.remove(element.id);
+                                  if (mounted) setState(() {});
                                 }
                               }
-                              if (mounted) setState(() {});
                             },
                           );
                         },
                         childCount: _images.length,
                       ),
                     ),
+                    if (_isLoadingMore)
+                      const SliverToBoxAdapter(
+                        child: SizedBox(
+                          width: 60,
+                          child: Center(
+                            child: SizedBox.square(
+                              dimension: 24,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            ),
+                          ),
+                        ),
+                      ),
                   ],
                 ),
               ),
