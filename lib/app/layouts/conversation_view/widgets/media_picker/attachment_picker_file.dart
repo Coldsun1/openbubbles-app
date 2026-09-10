@@ -2,7 +2,6 @@ import 'dart:typed_data';
 
 import 'package:bluebubbles/app/wrappers/stateful_boilerplate.dart';
 import 'package:bluebubbles/helpers/ui/theme_helpers.dart';
-import 'package:bluebubbles/database/models.dart';
 import 'package:bluebubbles/services/services.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
@@ -16,10 +15,12 @@ class AttachmentPickerFile extends StatefulWidget {
     required this.onTap,
     required this.data,
     required this.controller,
+    this.selectedPath,
   });
   final AssetEntity data;
   final Function() onTap;
   final ConversationViewController controller;
+  final String? selectedPath;
 
   @override
   State<AttachmentPickerFile> createState() => _AttachmentPickerFileState();
@@ -36,29 +37,18 @@ class _AttachmentPickerFileState extends OptimizedState<AttachmentPickerFile> wi
   }
 
   Future<void> load() async {
-    final file = (await widget.data.file)!;
+    final file = await widget.data.file;
+    if (file == null) return;
     path = file.path;
-    if (widget.data.mimeType?.startsWith("video/") ?? false) {
-      try {
-        image = await as.getVideoThumbnail(file.path, useCachedFile: false);
-      } catch (ex) {
-        image = fs.noVideoPreviewIcon;
-      }
-      setState(() {});
-    } else if (widget.data.mimeType == "image/heic"
-        || widget.data.mimeType == "image/heif"
-        || widget.data.mimeType == "image/tif"
-        || widget.data.mimeType == "image/tiff") {
-      final fakeAttachment = Attachment(
-        transferName: file.path,
-        mimeType: widget.data.mimeType!,
+    try {
+      image = await widget.data.thumbnailDataWithSize(
+        const ThumbnailSize.square(300),
+        quality: 85,
       );
-      image = await as.loadAndGetProperties(fakeAttachment, actualPath: file.path, onlyFetchData: true, isPreview: true);
-      setState(() {});
-    } else {
-      image = await file.readAsBytes();
-      setState(() {});
+    } catch (_) {
+      if (widget.data.type == AssetType.video) image = fs.noVideoPreviewIcon;
     }
+    if (mounted) setState(() {});
   }
 
   @override
@@ -67,7 +57,10 @@ class _AttachmentPickerFileState extends OptimizedState<AttachmentPickerFile> wi
 
     super.build(context);
     return Obx(() {
-      bool containsThis = widget.controller.pickedAttachments.firstWhereOrNull((e) => e.path == path) != null;
+      bool containsThis = widget.controller.pickedAttachments.firstWhereOrNull(
+        (e) => (path != null && e.path == path)
+            || (widget.selectedPath != null && e.path == widget.selectedPath),
+      ) != null;
       return AnimatedContainer(
         duration: const Duration(milliseconds: 250),
         margin: EdgeInsets.all(containsThis ? 10 : 0),
