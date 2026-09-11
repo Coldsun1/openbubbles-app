@@ -1,8 +1,8 @@
 on: [ push, pull_request ]
-name: Build
+name: Build compact Alpha
 jobs:
   build:
-    name: OpenBubbles APK
+    name: OpenBubbles compact APK
     runs-on: ubuntu-latest
     steps:
       - name: Free Disk Space (Ubuntu)
@@ -35,7 +35,7 @@ jobs:
         with:
           java-version: '21'
           distribution: 'temurin'
-      
+
       - name: Setup Android SDK
         uses: amyu/setup-android@v5
 
@@ -64,12 +64,42 @@ jobs:
               cp rustpush/certs/legacy-fairplay/fairplay.crt rustpush/certs/fairplay/$name.crt
           done
 
-      # First run is expected to fail until ffmpeg_kit_flutter_new is fixed.
-      - name: Run Build Script
+      - name: Build compact ARM64 Alpha APK
+        run: flutter build apk --flavor alpha --profile --target-platform android-arm64
+
+      - name: Report APK contents
         run: |
-          flutter build apk --flavor alpha --debug --target-platform android-arm64
-      
+          ls -lh build/app/outputs/flutter-apk/app-alpha-profile.apk
+          python3 - <<'PY'
+          import collections
+          import pathlib
+          import zipfile
+
+          apk = pathlib.Path("build/app/outputs/flutter-apk/app-alpha-profile.apk")
+          print(f"APK exact bytes: {apk.stat().st_size}")
+          with zipfile.ZipFile(apk) as archive:
+              entries = archive.infolist()
+              groups = collections.Counter()
+              for entry in entries:
+                  parts = entry.filename.split("/")
+                  if entry.filename.startswith("lib/") and len(parts) > 2:
+                      group = "/".join(parts[:2])
+                  elif entry.filename.startswith("assets/flutter_assets/"):
+                      group = "assets/flutter_assets"
+                  else:
+                      group = parts[0]
+                  groups[group] += entry.compress_size
+
+              print("\nLargest compressed groups:")
+              for name, size in groups.most_common(20):
+                  print(f"{size / 1024 / 1024:9.2f} MiB  {name}")
+
+              print("\nLargest individual entries:")
+              for entry in sorted(entries, key=lambda item: item.compress_size, reverse=True)[:30]:
+                  print(f"{entry.compress_size / 1024 / 1024:9.2f} MiB  {entry.filename}")
+          PY
+
       - uses: actions/upload-artifact@v4
         with:
-          name: Alpha Debug APK
-          path: build/app/outputs/flutter-apk/app-alpha-debug.apk
+          name: Compact Combined Alpha APK
+          path: build/app/outputs/flutter-apk/app-alpha-profile.apk
