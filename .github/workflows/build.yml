@@ -1,8 +1,8 @@
 on: [ push, pull_request ]
-name: Build compact Alpha
+name: Build Pixel 8 Alpha
 jobs:
   build:
-    name: OpenBubbles compact APK
+    name: OpenBubbles Pixel 8 APK
     runs-on: ubuntu-latest
     steps:
       - name: Free Disk Space (Ubuntu)
@@ -64,18 +64,25 @@ jobs:
               cp rustpush/certs/legacy-fairplay/fairplay.crt rustpush/certs/fairplay/$name.crt
           done
 
-      - name: Build compact ARM64 Alpha APK
-        run: flutter build apk --flavor alpha --profile --target-platform android-arm64
+      - name: Build Pixel 8 ARM64 Alpha APK
+        run: flutter build apk --flavor alpha --profile --target-platform android-arm64 --split-per-abi
+
+      - name: Locate APK
+        run: |
+          apk_path=$(find build/app/outputs/flutter-apk -name '*arm64-v8a*profile.apk' -print -quit)
+          test -n "$apk_path"
+          echo "APK_PATH=$apk_path" >> "$GITHUB_ENV"
 
       - name: Report APK contents
         run: |
-          ls -lh build/app/outputs/flutter-apk/app-alpha-profile.apk
+          ls -lh "$APK_PATH"
           python3 - <<'PY'
           import collections
+          import os
           import pathlib
           import zipfile
 
-          apk = pathlib.Path("build/app/outputs/flutter-apk/app-alpha-profile.apk")
+          apk = pathlib.Path(os.environ["APK_PATH"])
           print(f"APK exact bytes: {apk.stat().st_size}")
           with zipfile.ZipFile(apk) as archive:
               entries = archive.infolist()
@@ -101,5 +108,5 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: Compact Combined Alpha APK
-          path: build/app/outputs/flutter-apk/app-alpha-profile.apk
+          name: Pixel 8 Combined Alpha APK
+          path: ${{ env.APK_PATH }}
